@@ -175,6 +175,7 @@ PRODUCT_COPY_FILES += \
 PRODUCT_ENFORCE_RRO_TARGETS += *
 
 PRODUCT_PACKAGES += \
+    NcmTetheringOverlay \
     Sdm660CarrierConfigOverlay \
     Sdm660DialerOverlay \
     Sdm660FrameworksOverlay \
