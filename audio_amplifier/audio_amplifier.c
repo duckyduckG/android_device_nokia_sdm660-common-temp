@@ -1,7 +1,18 @@
 /*
- * SPDX-FileCopyrightText: 2015 The CyanogenMod Project
- * SPDX-FileCopyrightText: 2020-2025 The LineageOS Project
- * SPDX-License-Identifier: Apache-2.0
+ * Copyright (C) 2015 The CyanogenMod Open Source Project
+ * Copyright (C) 2020-2025 The LineageOS Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 #define LOG_TAG "amplifier_sdm660"
@@ -9,20 +20,21 @@
 
 #include <dlfcn.h>
 #include <log/log.h>
+#include <system/audio.h>
 
 /* clang-format off */
 #include "platform.h"
 #include "platform_api.h"
 
 #define is_spkr_out_snd_dev(x) \
-  (((x) == SND_DEVICE_OUT_SPEAKER) || \
-  ((x) == SND_DEVICE_OUT_SPEAKER_REVERSE) || \
-  ((x) == SND_DEVICE_OUT_SPEAKER_AND_HEADPHONES) || \
-  ((x) == SND_DEVICE_OUT_SPEAKER_AND_ANC_HEADSET) || \
-  ((x) == SND_DEVICE_OUT_SPEAKER_AND_HDMI) || \
-  ((x) == SND_DEVICE_OUT_SPEAKER_AND_USB_HEADSET) || \
-  ((x) == SND_DEVICE_OUT_VOICE_SPEAKER) || \
-  ((x) == SND_DEVICE_OUT_VOICE_SPEAKER_2))
+    (((x) == SND_DEVICE_OUT_SPEAKER) || \
+    ((x) == SND_DEVICE_OUT_SPEAKER_REVERSE) || \
+    ((x) == SND_DEVICE_OUT_SPEAKER_AND_HEADPHONES) || \
+    ((x) == SND_DEVICE_OUT_SPEAKER_AND_ANC_HEADSET) || \
+    ((x) == SND_DEVICE_OUT_SPEAKER_AND_HDMI) || \
+    ((x) == SND_DEVICE_OUT_SPEAKER_AND_USB_HEADSET) || \
+    ((x) == SND_DEVICE_OUT_VOICE_SPEAKER) || \
+    ((x) == SND_DEVICE_OUT_VOICE_SPEAKER_2))
 /* clang-format on */
 
 typedef struct amp_device {
@@ -41,28 +53,34 @@ typedef struct amp_device {
 
 static tfa_t* tfa_dev = NULL;
 
-static int tfa98xx_feedback(void* adev, uint32_t snd_device, bool enable) {
+static struct pcm_config pcm_config_tfa98xx = {
+        .channels = 2,
+        .rate = 48000,
+        .period_size = 256,
+        .period_count = 4,
+        .format = PCM_FORMAT_S16_LE,
+        .start_threshold = 0,
+        .stop_threshold = INT_MAX,
+        .avail_min = 0,
+};
+
+static int amp_set_feedback(amplifier_device_t* device, void* adev, uint32_t snd_device,
+                            bool enable) {
+    if (!device) return 0;
+
     tfa_dev->adev = (struct audio_device*)adev;
     int pcm_dev_tx_id = 0, rc = 0;
-    struct pcm_config pcm_config_tfa98xx = {
-            .channels = 2,
-            .rate = 48000,
-            .period_size = 256,
-            .period_count = 4,
-            .format = PCM_FORMAT_S16_LE,
-            .start_threshold = 0,
-            .stop_threshold = INT_MAX,
-            .silence_threshold = 0,
-    };
 
-    if (!tfa_dev) {
+    if (!tfa_dev->adev) {
         ALOGE("%d: Invalid params", __LINE__);
         return -EINVAL;
     }
 
-    if (tfa_dev->tfa98xx_out || !is_spkr_out_snd_dev(snd_device)) return 0;
+    if (!is_spkr_out_snd_dev(snd_device)) return 0;
 
     if (!enable) goto disable;
+
+    if (tfa_dev->tfa98xx_out) return 0;
 
     tfa_dev->usecase_tx = (struct audio_usecase*)calloc(1, sizeof(struct audio_usecase));
     if (!tfa_dev->usecase_tx) {
@@ -89,7 +107,7 @@ static int tfa98xx_feedback(void* adev, uint32_t snd_device, bool enable) {
 
     tfa_dev->tfa98xx_out =
             pcm_open(tfa_dev->adev->snd_card, pcm_dev_tx_id, PCM_IN, &pcm_config_tfa98xx);
-    if (!pcm_is_ready(tfa_dev->tfa98xx_out)) {
+    if (tfa_dev->tfa98xx_out && !pcm_is_ready(tfa_dev->tfa98xx_out)) {
         ALOGE("%d: %s", __LINE__, pcm_get_error(tfa_dev->tfa98xx_out));
         rc = -EIO;
         goto disable;
@@ -101,6 +119,9 @@ static int tfa98xx_feedback(void* adev, uint32_t snd_device, bool enable) {
         rc = -EINVAL;
         goto disable;
     }
+
+    ALOGD("%s: Started tfa98xx feedback successfully", __func__);
+
     return 0;
 
 disable:
@@ -109,20 +130,15 @@ disable:
         pcm_close(tfa_dev->tfa98xx_out);
         tfa_dev->tfa98xx_out = NULL;
     }
-    tfa_dev->usecase_tx =
-            tfa_dev->get_usecase_from_list(tfa_dev->adev, tfa_dev->usecase_tx->in_snd_device);
+    tfa_dev->usecase_tx = tfa_dev->get_usecase_from_list(tfa_dev->adev, tfa_dev->usecase_tx->id);
     if (tfa_dev->usecase_tx) {
+        ALOGD("%s: Disabling tfa98xx feedback", __func__);
         list_remove(&tfa_dev->usecase_tx->list);
-    tfa_dev->disable_snd_device(tfa_dev->adev, tfa_dev->usecase_tx->in_snd_device);
-    tfa_dev->disable_audio_route(tfa_dev->adev, tfa_dev->usecase_tx);
+        tfa_dev->disable_snd_device(tfa_dev->adev, tfa_dev->usecase_tx->in_snd_device);
+        tfa_dev->disable_audio_route(tfa_dev->adev, tfa_dev->usecase_tx);
         free(tfa_dev->usecase_tx);
     }
     return rc;
-}
-
-static int amp_set_feedback(amplifier_device_t* device, void* adev, uint32_t devices, bool enable) {
-    if (device) tfa98xx_feedback(adev, devices, enable);
-    return 0;
 }
 
 static int amp_dev_close(hw_device_t* device) {
@@ -193,7 +209,7 @@ amplifier_module_t HAL_MODULE_INFO_SYM = {
         .module_api_version = AMPLIFIER_MODULE_API_VERSION_0_1,
         .hal_api_version = HARDWARE_HAL_API_VERSION,
         .id = AMPLIFIER_HARDWARE_MODULE_ID,
-        .name = "Nokia SDM660 TFA98XX audio amplifier HAL",
+        .name = "TFA98XX audio amplifier HAL",
         .author = "The LineageOS Open Source Project",
         .methods = &hal_module_methods,
     },
